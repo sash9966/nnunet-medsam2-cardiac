@@ -1,0 +1,89 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data files (large medical images)
+*.nii.gz
+*.nii
+*.npz
+*.dcm
+*.dicom
+*.mha
+*.mhd
+*.raw
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pkl
+
+# Output directories
+medsam2_results/
+prompts_out/
+nnunet_output/
+*.csv
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Keep directory structure but ignore contents
+!ct_images/.gitkeep
+!medsam2_results/.gitkeep
+!prompts_out/.gitkeep
+!nnunet_output/.gitkeep
+!MedSAM2/checkpoints/.gitkeep
+
