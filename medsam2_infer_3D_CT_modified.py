@@ -14,6 +14,12 @@ from PIL import Image
 import SimpleITK as sitk
 import torch
 import torch.multiprocessing as mp
+# Import from MedSAM2 - adjust path if needed
+# If running from root directory with MedSAM2 as subdirectory:
+import sys
+sys.path.insert(0, 'MedSAM2')
+# Import sam2 to initialize Hydra config module
+import sam2
 from sam2.build_sam import build_sam2_video_predictor_npz
 import SimpleITK as sitk
 from skimage import measure, morphology
@@ -535,19 +541,34 @@ for case_info in tqdm(cases_to_process):
                     pass
 
                 for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
-                    # out_mask_logits shape: [num_objects, H, W] or [num_objects, 1, H, W]
-                    # Get first object's mask
-                    mask_tensor = out_mask_logits[0]  # Shape: [H, W] or [1, H, W]
-                    mask_2d = (mask_tensor > 0.0).cpu().numpy()
-                    # Squeeze to remove any singleton dimensions
-                    if mask_2d.ndim == 3:
-                        mask_2d = mask_2d.squeeze(0)  # Remove channel dimension if present
-                    elif mask_2d.ndim == 1:
-                        # If somehow 1D, skip this frame
-                        print(f"    Warning: Unexpected mask shape {mask_2d.shape} for frame {out_frame_idx}")
+                    # Follow exact pattern from medsam2_infer_CT_lesion_npz_recist.py line 383
+                    # out_mask_logits[0] shape is [1, H, W], need [0] after numpy conversion
+                    mask_2d = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
+                    
+                    # Debug: print shape on first few frames
+                    if out_frame_idx <= key_slice_idx_offset + 2:
+                        print(f"    Frame {out_frame_idx}: out_mask_logits[0] shape: {out_mask_logits[0].shape}, mask_2d shape: {mask_2d.shape}, dtype: {mask_2d.dtype}")
+                        print(f"    Frame {out_frame_idx}: mask_2d non-zero: {np.sum(mask_2d > 0)}")
+                    
+                    # Ensure mask_2d is 2D [H, W] boolean
+                    if mask_2d.ndim != 2:
+                        print(f"    Warning: mask_2d has {mask_2d.ndim} dimensions, expected 2. Shape: {mask_2d.shape}")
                         continue
-                    # Apply mask to segmentation (mask_2d should be [H, W] boolean)
-                    segs_3D[out_frame_idx, mask_2d] = 1
+                    
+                    mask_2d = mask_2d.astype(bool)
+                    
+                    # Apply mask to segmentation - use exact pattern from working example
+                    # segs_3D shape: [D, H, W], mask_2d shape: [H, W]
+                    if out_frame_idx < segs_3D.shape[0]:
+                        # Use boolean indexing: segs_3D[z, y, x] where mask_2d[y, x] is True
+                        segs_3D[out_frame_idx, mask_2d] = 1
+                        
+                        # Debug: check if any voxels were set
+                        if out_frame_idx <= key_slice_idx_offset + 2:
+                            num_set = np.sum(segs_3D[out_frame_idx] > 0)
+                            print(f"    Frame {out_frame_idx}: Set {num_set} voxels (mask had {np.sum(mask_2d)} True values)")
+                    else:
+                        print(f"    Warning: out_frame_idx {out_frame_idx} >= segs_3D.shape[0] {segs_3D.shape[0]}")
                 predictor.reset_state(inference_state)
                 # Re-initialize for reverse propagation
                 if coarse_mask_2d is not None:
@@ -568,7 +589,19 @@ for case_info in tqdm(cases_to_process):
                     pass
 
                 for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=True):
-                    segs_3D[out_frame_idx, (out_mask_logits[0] > 0.0).cpu().numpy()[0]] = 1
+                    # out_mask_logits shape: [num_objects, H, W] or [num_objects, 1, H, W]
+                    # Get first object's mask
+                    mask_tensor = out_mask_logits[0]  # Shape: [H, W] or [1, H, W]
+                    mask_2d = (mask_tensor > 0.0).cpu().numpy()
+                    # Squeeze to remove any singleton dimensions
+                    if mask_2d.ndim == 3:
+                        mask_2d = mask_2d.squeeze(0)  # Remove channel dimension if present
+                    elif mask_2d.ndim == 1:
+                        # If somehow 1D, skip this frame
+                        print(f"    Warning: Unexpected mask shape {mask_2d.shape} for frame {out_frame_idx}")
+                        continue
+                    # Apply mask to segmentation (mask_2d should be [H, W] boolean)
+                    segs_3D[out_frame_idx, mask_2d] = 1
                 predictor.reset_state(inference_state)
         else:
             # CPU inference without autocast
@@ -597,19 +630,34 @@ for case_info in tqdm(cases_to_process):
                     pass
 
                 for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
-                    # out_mask_logits shape: [num_objects, H, W] or [num_objects, 1, H, W]
-                    # Get first object's mask
-                    mask_tensor = out_mask_logits[0]  # Shape: [H, W] or [1, H, W]
-                    mask_2d = (mask_tensor > 0.0).cpu().numpy()
-                    # Squeeze to remove any singleton dimensions
-                    if mask_2d.ndim == 3:
-                        mask_2d = mask_2d.squeeze(0)  # Remove channel dimension if present
-                    elif mask_2d.ndim == 1:
-                        # If somehow 1D, skip this frame
-                        print(f"    Warning: Unexpected mask shape {mask_2d.shape} for frame {out_frame_idx}")
+                    # Follow exact pattern from medsam2_infer_CT_lesion_npz_recist.py line 383
+                    # out_mask_logits[0] shape is [1, H, W], need [0] after numpy conversion
+                    mask_2d = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
+                    
+                    # Debug: print shape on first few frames
+                    if out_frame_idx <= key_slice_idx_offset + 2:
+                        print(f"    Frame {out_frame_idx}: out_mask_logits[0] shape: {out_mask_logits[0].shape}, mask_2d shape: {mask_2d.shape}, dtype: {mask_2d.dtype}")
+                        print(f"    Frame {out_frame_idx}: mask_2d non-zero: {np.sum(mask_2d > 0)}")
+                    
+                    # Ensure mask_2d is 2D [H, W] boolean
+                    if mask_2d.ndim != 2:
+                        print(f"    Warning: mask_2d has {mask_2d.ndim} dimensions, expected 2. Shape: {mask_2d.shape}")
                         continue
-                    # Apply mask to segmentation (mask_2d should be [H, W] boolean)
-                    segs_3D[out_frame_idx, mask_2d] = 1
+                    
+                    mask_2d = mask_2d.astype(bool)
+                    
+                    # Apply mask to segmentation - use exact pattern from working example
+                    # segs_3D shape: [D, H, W], mask_2d shape: [H, W]
+                    if out_frame_idx < segs_3D.shape[0]:
+                        # Use boolean indexing: segs_3D[z, y, x] where mask_2d[y, x] is True
+                        segs_3D[out_frame_idx, mask_2d] = 1
+                        
+                        # Debug: check if any voxels were set
+                        if out_frame_idx <= key_slice_idx_offset + 2:
+                            num_set = np.sum(segs_3D[out_frame_idx] > 0)
+                            print(f"    Frame {out_frame_idx}: Set {num_set} voxels (mask had {np.sum(mask_2d)} True values)")
+                    else:
+                        print(f"    Warning: out_frame_idx {out_frame_idx} >= segs_3D.shape[0] {segs_3D.shape[0]}")
                 predictor.reset_state(inference_state)
                 # Re-initialize for reverse propagation
                 if coarse_mask_2d is not None:
@@ -630,7 +678,19 @@ for case_info in tqdm(cases_to_process):
                     pass
 
                 for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=True):
-                    segs_3D[out_frame_idx, (out_mask_logits[0] > 0.0).cpu().numpy()[0]] = 1
+                    # out_mask_logits shape: [num_objects, H, W] or [num_objects, 1, H, W]
+                    # Get first object's mask
+                    mask_tensor = out_mask_logits[0]  # Shape: [H, W] or [1, H, W]
+                    mask_2d = (mask_tensor > 0.0).cpu().numpy()
+                    # Squeeze to remove any singleton dimensions
+                    if mask_2d.ndim == 3:
+                        mask_2d = mask_2d.squeeze(0)  # Remove channel dimension if present
+                    elif mask_2d.ndim == 1:
+                        # If somehow 1D, skip this frame
+                        print(f"    Warning: Unexpected mask shape {mask_2d.shape} for frame {out_frame_idx}")
+                        continue
+                    # Apply mask to segmentation (mask_2d should be [H, W] boolean)
+                    segs_3D[out_frame_idx, mask_2d] = 1
                 predictor.reset_state(inference_state)
         # Post-process segmentation
         if np.max(segs_3D) > 0:

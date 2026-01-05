@@ -410,11 +410,12 @@ def main():
             for mask_file in mask_files:
                 # Extract case_id from filename like "ct_1023_LV_mask.nii.gz"
                 # Pattern: {case_id}_{label_name}_mask.nii.gz
-                stem = mask_file.stem.replace('_mask', '')
-                # Find the label name in the stem
+                # Remove .nii.gz extension and _mask suffix
+                name_base = mask_file.name.replace('.nii.gz', '').replace('_mask', '')
+                # Find the label name in the name_base
                 for label_name in LABEL_NAMES.values():
-                    if stem.endswith(f'_{label_name}'):
-                        case_id = stem[:-len(f'_{label_name}')]
+                    if name_base.endswith(f'_{label_name}'):
+                        case_id = name_base[:-len(f'_{label_name}')]
                         case_ids.add(case_id)
                         break
         
