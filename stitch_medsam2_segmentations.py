@@ -56,19 +56,27 @@ def load_sitk(sitk_path):
     return data, img
 
 
-def find_case_masks(masks_dir, case_id):
+def find_case_masks(masks_dir, case_id, use_negprompts=False):
     """Find all mask files for a given case ID."""
     masks_dir = Path(masks_dir)
     mask_files = {}
     
     for label_id, label_name in LABEL_NAMES.items():
-        mask_pattern = f"{case_id}_{label_name}_mask.nii.gz"
+        # Try different naming patterns
+        if use_negprompts:
+            mask_pattern = f"{case_id}_{label_name}_negprompts_mask.nii.gz"
+        else:
+            mask_pattern = f"{case_id}_{label_name}_mask.nii.gz"
+        
         mask_path = masks_dir / mask_pattern
         if mask_path.exists():
             mask_files[label_id] = mask_path
         else:
             # Try alternative naming (in case of different format)
-            alt_pattern = f"{case_id}*{label_name}*mask*.nii.gz"
+            if use_negprompts:
+                alt_pattern = f"{case_id}*{label_name}*negprompts*mask*.nii.gz"
+            else:
+                alt_pattern = f"{case_id}*{label_name}*mask*.nii.gz"
             alt_matches = list(masks_dir.glob(alt_pattern))
             if alt_matches:
                 mask_files[label_id] = alt_matches[0]
@@ -256,7 +264,7 @@ def save_combined_segmentation(combined_seg, output_path, reference_img_path=Non
     # Fall back: use first available mask or create new image
     # Try to find a mask file to copy spatial info from
     masks_dir = output_path.parent
-    case_id = output_path.stem.replace('_seg', '').replace('.nii', '')
+    case_id = output_path.stem.replace('_medsamrefined_seg', '').replace('_seg', '').replace('.nii', '')
     mask_files = list(masks_dir.glob(f"{case_id}_*_mask.nii.gz"))
     
     if mask_files:
@@ -281,12 +289,12 @@ def save_combined_segmentation(combined_seg, output_path, reference_img_path=Non
         print(f"  Error saving segmentation: {e}")
 
 
-def process_case(case_id, masks_dir, output_dir, reference_dir=None):
+def process_case(case_id, masks_dir, output_dir, reference_dir=None, use_negprompts=False):
     """Process a single case: combine masks and save."""
     print(f"\nProcessing case: {case_id}")
     
     # Find all masks for this case
-    mask_files = find_case_masks(masks_dir, case_id)
+    mask_files = find_case_masks(masks_dir, case_id, use_negprompts=use_negprompts)
     
     if not mask_files:
         print(f"  No mask files found for {case_id}")
@@ -324,7 +332,10 @@ def process_case(case_id, masks_dir, output_dir, reference_dir=None):
         return False
     
     # Save combined segmentation
-    output_path = Path(output_dir) / f"{case_id}_seg.nii.gz"
+    if use_negprompts:
+        output_path = Path(output_dir) / f"{case_id}_medsamrefined_negprompts_seg.nii.gz"
+    else:
+        output_path = Path(output_dir) / f"{case_id}_medsamrefined_seg.nii.gz"
     save_combined_segmentation(
         combined_seg, 
         output_path,
@@ -378,6 +389,11 @@ def main():
         default=None,
         help='Specific case IDs to process (e.g., ct_1023 ct_1028). If not provided, processes all cases found in masks_dir'
     )
+    parser.add_argument(
+        '--use_negprompts',
+        action='store_true',
+        help='Use negative prompts naming pattern (looks for *_negprompts_mask.nii.gz files)'
+    )
     
     args = parser.parse_args()
     
@@ -406,12 +422,13 @@ def main():
         
         # Also extract from mask filenames as fallback
         if not case_ids:
-            mask_files = list(masks_dir.glob("*_*_mask.nii.gz"))
+            # Try both regular and negprompts patterns
+            mask_files = list(masks_dir.glob("*_*_mask.nii.gz")) + list(masks_dir.glob("*_*_negprompts_mask.nii.gz"))
             for mask_file in mask_files:
-                # Extract case_id from filename like "ct_1023_LV_mask.nii.gz"
-                # Pattern: {case_id}_{label_name}_mask.nii.gz
-                # Remove .nii.gz extension and _mask suffix
-                name_base = mask_file.name.replace('.nii.gz', '').replace('_mask', '')
+                # Extract case_id from filename like "ct_1023_LV_mask.nii.gz" or "ct_1023_LV_negprompts_mask.nii.gz"
+                # Pattern: {case_id}_{label_name}_mask.nii.gz or {case_id}_{label_name}_negprompts_mask.nii.gz
+                # Remove .nii.gz extension and _mask suffix (and _negprompts if present)
+                name_base = mask_file.name.replace('.nii.gz', '').replace('_negprompts_mask', '').replace('_mask', '')
                 # Find the label name in the name_base
                 for label_name in LABEL_NAMES.values():
                     if name_base.endswith(f'_{label_name}'):
@@ -426,7 +443,7 @@ def main():
     # Process each case
     success_count = 0
     for case_id in tqdm(case_ids, desc="Processing cases"):
-        if process_case(case_id, masks_dir, output_dir, args.reference_dir):
+        if process_case(case_id, masks_dir, output_dir, args.reference_dir, use_negprompts=args.use_negprompts):
             success_count += 1
     
     print(f"\n{'='*60}")

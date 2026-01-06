@@ -1,0 +1,152 @@
+{
+  "case_id": "ct_1036",
+  "labels": {
+    "LV": {
+      "label_id": 1,
+      "positive_mask_path": "LV_positive_mask.nii.gz",
+      "negative_mask_path": "LV_negative_mask.nii.gz",
+      "bbox_3d": {
+        "z": [
+          27,
+          114
+        ],
+        "y": [
+          130,
+          271
+        ],
+        "x": [
+          263,
+          420
+        ]
+      },
+      "num_positive_voxels": 518515,
+      "num_negative_voxels": 7215984
+    },
+    "RV": {
+      "label_id": 2,
+      "positive_mask_path": "RV_positive_mask.nii.gz",
+      "negative_mask_path": "RV_negative_mask.nii.gz",
+      "bbox_3d": {
+        "z": [
+          19,
+          137
+        ],
+        "y": [
+          91,
+          192
+        ],
+        "x": [
+          226,
+          380
+        ]
+      },
+      "num_positive_voxels": 677753,
+      "num_negative_voxels": 7126767
+    },
+    "LA": {
+      "label_id": 3,
+      "positive_mask_path": "LA_positive_mask.nii.gz",
+      "negative_mask_path": "LA_negative_mask.nii.gz",
+      "bbox_3d": {
+        "z": [
+          45,
+          167
+        ],
+        "y": [
+          165,
+          366
+        ],
+        "x": [
+          98,
+          390
+        ]
+      },
+      "num_positive_voxels": 1391100,
+      "num_negative_voxels": 6235073
+    },
+    "RA": {
+      "label_id": 4,
+      "positive_mask_path": "RA_positive_mask.nii.gz",
+      "negative_mask_path": "RA_negative_mask.nii.gz",
+      "bbox_3d": {
+        "z": [
+          8,
+          208
+        ],
+        "y": [
+          99,
+          297
+        ],
+        "x": [
+          119,
+          327
+        ]
+      },
+      "num_positive_voxels": 1766556,
+      "num_negative_voxels": 5869382
+    },
+    "Myo": {
+      "label_id": 5,
+      "positive_mask_path": "Myo_positive_mask.nii.gz",
+      "negative_mask_path": "Myo_negative_mask.nii.gz",
+      "bbox_3d": {
+        "z": [
+          9,
+          138
+        ],
+        "y": [
+          79,
+          293
+        ],
+        "x": [
+          206,
+          444
+        ]
+      },
+      "num_positive_voxels": 2312897,
+      "num_negative_voxels": 5909624
+    },
+    "Aorta": {
+      "label_id": 6,
+      "positive_mask_path": "Aorta_positive_mask.nii.gz",
+      "negative_mask_path": "Aorta_negative_mask.nii.gz",
+      "bbox_3d": {
+        "z": [
+          4,
+          220
+        ],
+        "y": [
+          160,
+          352
+        ],
+        "x": [
+          152,
+          314
+        ]
+      },
+      "num_positive_voxels": 814711,
+      "num_negative_voxels": 6718572
+    },
+    "Pulmonary": {
+      "label_id": 7,
+      "positive_mask_path": "Pulmonary_positive_mask.nii.gz",
+      "negative_mask_path": "Pulmonary_negative_mask.nii.gz",
+      "bbox_3d": {
+        "z": [
+          66,
+          186
+        ],
+        "y": [
+          125,
+          391
+        ],
+        "x": [
+          71,
+          392
+        ]
+      },
+      "num_positive_voxels": 963548,
+      "num_negative_voxels": 6579845
+    }
+  }
+}
