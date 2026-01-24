@@ -63,23 +63,49 @@ def find_case_masks(masks_dir, case_id, use_negprompts=False):
     
     for label_id, label_name in LABEL_NAMES.items():
         # Try different naming patterns
-        if use_negprompts:
-            mask_pattern = f"{case_id}_{label_name}_negprompts_mask.nii.gz"
-        else:
-            mask_pattern = f"{case_id}_{label_name}_mask.nii.gz"
+        # Pattern 1: {case_id}_{label_name}_mask.nii.gz (e.g., ct_1004_LV_mask.nii.gz)
+        # Pattern 2: {case_id}_0000_{label_name}_mask.nii.gz (e.g., ct_1004_0000_LV_mask.nii.gz)
+        patterns_to_try = []
         
-        mask_path = masks_dir / mask_pattern
-        if mask_path.exists():
-            mask_files[label_id] = mask_path
+        if use_negprompts:
+            patterns_to_try = [
+                f"{case_id}_{label_name}_negprompts_mask.nii.gz",
+                f"{case_id}_0000_{label_name}_negprompts_mask.nii.gz"
+            ]
         else:
-            # Try alternative naming (in case of different format)
+            patterns_to_try = [
+                f"{case_id}_{label_name}_mask.nii.gz",
+                f"{case_id}_0000_{label_name}_mask.nii.gz"
+            ]
+        
+        found = False
+        for mask_pattern in patterns_to_try:
+            mask_path = masks_dir / mask_pattern
+            if mask_path.exists():
+                mask_files[label_id] = mask_path
+                found = True
+                break
+        
+        # If not found with exact patterns, try glob pattern
+        if not found:
             if use_negprompts:
                 alt_pattern = f"{case_id}*{label_name}*negprompts*mask*.nii.gz"
             else:
-                alt_pattern = f"{case_id}*{label_name}*mask*.nii.gz"
-            alt_matches = list(masks_dir.glob(alt_pattern))
-            if alt_matches:
-                mask_files[label_id] = alt_matches[0]
+                # Try both with and without _0000
+                alt_patterns = [
+                    f"{case_id}*{label_name}*mask*.nii.gz",
+                    f"{case_id}_0000*{label_name}*mask*.nii.gz"
+                ]
+                for alt_pattern in alt_patterns:
+                    alt_matches = list(masks_dir.glob(alt_pattern))
+                    if alt_matches:
+                        mask_files[label_id] = alt_matches[0]
+                        found = True
+                        break
+            if not found and use_negprompts:
+                alt_matches = list(masks_dir.glob(alt_pattern))
+                if alt_matches:
+                    mask_files[label_id] = alt_matches[0]
     
     return mask_files
 
@@ -211,7 +237,6 @@ def combine_masks(mask_files, reference_shape=None, reference_affine=None):
             mask_array = zoom(mask_array, zoom_factors, order=0)
         
         # Binarize mask: any non-zero value becomes this label
-        # This ensures masks with values 0/1 or 0/255 both work correctly
         binary_mask = (mask_array > 0.5).astype(bool)
         
         # Assign label ID where mask is active
@@ -443,7 +468,8 @@ def main():
     # Process each case
     success_count = 0
     for case_id in tqdm(case_ids, desc="Processing cases"):
-        if process_case(case_id, masks_dir, output_dir, args.reference_dir, use_negprompts=args.use_negprompts):
+        if process_case(case_id, masks_dir, output_dir, args.reference_dir, 
+                       use_negprompts=args.use_negprompts):
             success_count += 1
     
     print(f"\n{'='*60}")

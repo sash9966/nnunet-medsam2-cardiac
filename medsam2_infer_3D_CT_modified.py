@@ -570,6 +570,9 @@ for case_info in tqdm(cases_to_process):
                     else:
                         print(f"    Warning: out_frame_idx {out_frame_idx} >= segs_3D.shape[0] {segs_3D.shape[0]}")
                 predictor.reset_state(inference_state)
+                # Re-initialize inference state for reverse propagation (CRITICAL: must re-init after reset)
+                inference_state = predictor.init_state(img_resized, video_height, video_width)
+                
                 # Re-initialize for reverse propagation
                 if coarse_mask_2d is not None:
                     frame_idx, out_obj_ids, out_mask_logits = predictor.add_new_mask(
@@ -659,6 +662,9 @@ for case_info in tqdm(cases_to_process):
                     else:
                         print(f"    Warning: out_frame_idx {out_frame_idx} >= segs_3D.shape[0] {segs_3D.shape[0]}")
                 predictor.reset_state(inference_state)
+                # Re-initialize inference state for reverse propagation (CRITICAL: must re-init after reset)
+                inference_state = predictor.init_state(img_resized, video_height, video_width)
+                
                 # Re-initialize for reverse propagation
                 if coarse_mask_2d is not None:
                     frame_idx, out_obj_ids, out_mask_logits = predictor.add_new_mask(
