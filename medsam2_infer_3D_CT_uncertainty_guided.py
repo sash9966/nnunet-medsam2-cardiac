@@ -87,6 +87,12 @@ parser.add_argument(
     default=None,
     help='directory containing nnU-Net segmentation files (for fallback and ensemble)',
 )
+parser.add_argument(
+    '--nnunet_prob_dir',
+    type=str,
+    default=None,
+    help='directory containing nnU-Net probability maps (.npz files) for entropy calculation',
+)
 
 args = parser.parse_args()
 checkpoint = args.checkpoint
@@ -96,6 +102,7 @@ gts_path = args.gts_path
 pred_save_dir = args.pred_save_dir
 prompts_dir = args.prompts_dir
 nnunet_seg_dir = args.nnunet_seg_dir
+nnunet_prob_dir = args.nnunet_prob_dir
 os.makedirs(pred_save_dir, exist_ok=True)
 
 # Handle config path - construct absolute path for Hydra
@@ -229,6 +236,123 @@ def load_nnunet_segmentation(nnunet_seg_dir, case_id):
         print(f"  Warning: Could not load nnU-Net segmentation: {e}")
         return None
 
+def load_nnunet_probabilities(nnunet_prob_dir, case_id):
+    """Load nnU-Net probability maps (.npz) for entropy calculation."""
+    if nnunet_prob_dir is None:
+        return None
+    
+    # Try different naming patterns
+    prob_paths = [
+        os.path.join(nnunet_prob_dir, f"{case_id}.npz"),
+        os.path.join(nnunet_prob_dir, f"{case_id}_probabilities.npz"),
+    ]
+    
+    for prob_path in prob_paths:
+        if exists(prob_path):
+            try:
+                prob_data = np.load(prob_path)
+                # Get probabilities array (usually key is 'probabilities' or 'softmax_output')
+                if 'probabilities' in prob_data:
+                    probabilities = prob_data['probabilities']
+                elif 'softmax_output' in prob_data:
+                    probabilities = prob_data['softmax_output']
+                else:
+                    # Try first array in the file
+                    keys = list(prob_data.keys())
+                    if keys:
+                        probabilities = prob_data[keys[0]]
+                    else:
+                        return None
+                return probabilities
+            except Exception as e:
+                print(f"  Warning: Could not load probability map {prob_path}: {e}")
+                continue
+    
+    return None
+
+def calculate_entropy_3d(probabilities, epsilon=1e-10):
+    """Calculate pixel-wise entropy from probability maps."""
+    probs = np.clip(probabilities, epsilon, 1.0 - epsilon)
+    entropy = -np.sum(probs * np.log(probs), axis=0)
+    return entropy
+
+def get_slice_mean_entropy(entropy_3d, z_slice):
+    """Get mean entropy for a specific slice."""
+    if entropy_3d is None or z_slice < 0 or z_slice >= entropy_3d.shape[0]:
+        return None
+    return np.mean(entropy_3d[z_slice])
+
+def sample_positive_points_from_nnunet_core(nnunet_seg_data, label_id, z_slice, n_points=5):
+    """Sample positive points from nnU-Net core (high-confidence region) for a specific slice."""
+    if nnunet_seg_data is None or z_slice < 0 or z_slice >= nnunet_seg_data.shape[0]:
+        return []
+    
+    # Get label mask for this slice
+    slice_mask = (nnunet_seg_data[z_slice] == label_id).astype(bool)
+    
+    if np.sum(slice_mask) == 0:
+        return []
+    
+    # Get coordinates of label pixels
+    coords = np.argwhere(slice_mask)
+    
+    # Sample n_points randomly
+    if len(coords) > n_points:
+        indices = np.random.choice(len(coords), n_points, replace=False)
+        sampled_coords = coords[indices]
+    else:
+        sampled_coords = coords
+    
+    # Convert to [y, x] format (for 2D slice)
+    points = sampled_coords[:, [0, 1]].astype(float)
+    return points.tolist()
+
+def sample_negative_points_from_entropy_boundary(entropy_3d, nnunet_seg_data, label_id, z_slice, n_points=5, entropy_percentile=75):
+    """Sample negative points from high-entropy boundary zones for a specific slice."""
+    if entropy_3d is None or z_slice < 0 or z_slice >= entropy_3d.shape[0]:
+        return []
+    
+    slice_entropy = entropy_3d[z_slice]
+    entropy_threshold = np.percentile(slice_entropy, entropy_percentile)
+    
+    # Get high-entropy regions
+    high_entropy_mask = slice_entropy > entropy_threshold
+    
+    # Get label mask for this slice
+    if nnunet_seg_data is not None:
+        label_mask = (nnunet_seg_data[z_slice] == label_id).astype(bool)
+        # Find boundary: high entropy near label boundary
+        from scipy.ndimage import binary_dilation
+        label_boundary = binary_dilation(label_mask, iterations=2) & ~label_mask
+        # High-entropy boundary zones
+        boundary_entropy_mask = high_entropy_mask & label_boundary
+    else:
+        # If no nnU-Net segmentation, just use high-entropy regions
+        boundary_entropy_mask = high_entropy_mask
+    
+    if np.sum(boundary_entropy_mask) == 0:
+        return []
+    
+    # Get coordinates
+    coords = np.argwhere(boundary_entropy_mask)
+    
+    # Sample n_points randomly
+    if len(coords) > n_points:
+        indices = np.random.choice(len(coords), n_points, replace=False)
+        sampled_coords = coords[indices]
+    else:
+        sampled_coords = coords
+    
+    # Convert to [y, x] format (for 2D slice)
+    points = sampled_coords[:, [0, 1]].astype(float)
+    return points.tolist()
+
+def is_mask_identical(mask1, mask2):
+    """Check if two masks are bit-wise identical."""
+    if mask1.shape != mask2.shape:
+        return False
+    return np.array_equal(mask1, mask2)
+
 # Initialize predictor
 predictor = build_sam2_video_predictor_npz(model_cfg, checkpoint, device=device)
 
@@ -321,6 +445,18 @@ for case_info in tqdm(cases_to_process):
     
     # Load nnU-Net segmentation if available
     nnunet_seg_data, nnunet_seg_img = load_nnunet_segmentation(nnunet_seg_dir, case_id) or (None, None)
+    
+    # Load nnU-Net probability maps for entropy calculation
+    probabilities = load_nnunet_probabilities(nnunet_prob_dir, case_id)
+    entropy_3d = None
+    entropy_75th_percentile = None
+    if probabilities is not None:
+        entropy_3d = calculate_entropy_3d(probabilities)
+        # Calculate 75th percentile threshold for all slices
+        entropy_75th_percentile = np.percentile(entropy_3d, 75)
+        print(f"  Loaded probability maps, entropy 75th percentile: {entropy_75th_percentile:.4f}")
+    else:
+        print(f"  Warning: No probability maps found, adaptive point sampling disabled")
     
     case_data = json_data
     prompts_list = enumerate(case_data.get('prompts', []))
@@ -533,8 +669,10 @@ for case_info in tqdm(cases_to_process):
                         )
                         print(f"    Initialized with bounding box on slice {key_slice_idx_offset}")
                     
-                    # Forward propagation
-                    # Follow exact pattern from medsam2_infer_CT_lesion_npz_recist.py
+                    # Forward propagation with Adaptive Point Sampling
+                    prev_mask_2d = None
+                    # entropy_75th_percentile is already calculated per case above
+                    
                     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
                         # Follow exact pattern from medsam2_infer_CT_lesion_npz_recist.py line 383
                         # out_mask_logits[0] shape is [1, H, W], need [0] after numpy conversion
@@ -562,11 +700,73 @@ for case_info in tqdm(cases_to_process):
                             if out_frame_idx <= key_slice_idx_offset + 2:
                                 print(f"    Frame {out_frame_idx}: Resized mask from {mask_2d.shape} to {expected_shape}")
                         
+                        # Validation: Check if mask is identical to previous slice (stalled propagation)
+                        needs_refinement = False
+                        if prev_mask_2d is not None and is_mask_identical(mask_2d, prev_mask_2d):
+                            print(f"    Frame {out_frame_idx}: WARNING - Mask identical to previous slice, propagation stalled!")
+                            needs_refinement = True
+                        
+                        # Check entropy for adaptive point sampling
+                        if entropy_3d is not None and out_frame_idx < entropy_3d.shape[0]:
+                            mean_entropy = get_slice_mean_entropy(entropy_3d, out_frame_idx)
+                            if mean_entropy is not None and entropy_75th_percentile is not None:
+                                if mean_entropy > entropy_75th_percentile:
+                                    print(f"    Frame {out_frame_idx}: High entropy ({mean_entropy:.4f} > {entropy_75th_percentile:.4f}), adding adaptive points")
+                                    needs_refinement = True
+                        
+                        # Refinement Step: Add new points if needed
+                        if needs_refinement and out_frame_idx < segs_3D.shape[0]:
+                            # Sample 5 positive points from nnU-Net core
+                            pos_points = sample_positive_points_from_nnunet_core(nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            # Sample 5 negative points from high-entropy boundary zones
+                            neg_points = sample_negative_points_from_entropy_boundary(entropy_3d, nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            
+                            if len(pos_points) > 0 or len(neg_points) > 0:
+                                # Combine points: positive (label=1) and negative (label=0)
+                                all_points = []
+                                all_labels = []
+                                
+                                for pt in pos_points:
+                                    all_points.append([pt[1], pt[0]])  # Convert [y, x] to [x, y] for SAM2
+                                    all_labels.append(1)
+                                
+                                for pt in neg_points:
+                                    all_points.append([pt[1], pt[0]])  # Convert [y, x] to [x, y] for SAM2
+                                    all_labels.append(0)
+                                
+                                if len(all_points) > 0:
+                                    points_tensor = torch.from_numpy(np.array(all_points)).to(device).unsqueeze(0)  # [1, N, 2]
+                                    labels_tensor = torch.from_numpy(np.array(all_labels)).to(device).unsqueeze(0)  # [1, N]
+                                    
+                                    # Add new points to current frame
+                                    try:
+                                        _, out_obj_ids, out_mask_logits_refined = predictor.add_new_points_or_box(
+                                            inference_state=inference_state,
+                                            frame_idx=out_frame_idx,
+                                            obj_id=1,
+                                            points=points_tensor,
+                                            labels=labels_tensor,
+                                            box=None,
+                                        )
+                                        # Update mask_2d with refined output
+                                        mask_2d_refined = (out_mask_logits_refined[0] > 0.0).cpu().numpy()[0]
+                                        if mask_2d_refined.ndim == 2:
+                                            mask_2d = mask_2d_refined.astype(bool)
+                                            if mask_2d.shape != expected_shape:
+                                                zoom_factors = (expected_shape[0] / mask_2d.shape[0], expected_shape[1] / mask_2d.shape[1])
+                                                mask_2d = zoom(mask_2d.astype(float), zoom_factors, order=0) > 0.5
+                                            print(f"    Frame {out_frame_idx}: Added {len(pos_points)} positive + {len(neg_points)} negative points, refined mask")
+                                    except Exception as e:
+                                        print(f"    Frame {out_frame_idx}: Warning - Could not add adaptive points: {e}")
+                        
                         # Apply mask to segmentation - use exact pattern from working example
                         # segs_3D shape: [D, H, W], mask_2d shape: [H, W]
                         if out_frame_idx < segs_3D.shape[0]:
                             # Use boolean indexing: segs_3D[z, y, x] where mask_2d[y, x] is True
                             segs_3D[out_frame_idx, mask_2d] = 1
+                            
+                            # Store current mask for next iteration validation
+                            prev_mask_2d = mask_2d.copy()
                             
                             # Debug: check if any voxels were set
                             if out_frame_idx <= key_slice_idx_offset + 2:
@@ -606,8 +806,8 @@ for case_info in tqdm(cases_to_process):
                             box=bbox,
                         )
                     
-                    # Reverse propagation
-                    # Follow exact pattern from medsam2_infer_CT_lesion_npz_recist.py
+                    # Reverse propagation with Adaptive Point Sampling
+                    prev_mask_2d_reverse = None
                     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=True):
                         # out_mask_logits shape: [num_objects, H, W] or [num_objects, 1, H, W]
                         # Get first object's mask
@@ -631,8 +831,70 @@ for case_info in tqdm(cases_to_process):
                             zoom_factors = (expected_shape[0] / mask_2d.shape[0], expected_shape[1] / mask_2d.shape[1])
                             mask_2d = zoom(mask_2d.astype(float), zoom_factors, order=0) > 0.5
                         
+                        # Validation: Check if mask is identical to previous slice (stalled propagation)
+                        needs_refinement = False
+                        if prev_mask_2d_reverse is not None and is_mask_identical(mask_2d, prev_mask_2d_reverse):
+                            print(f"    Frame {out_frame_idx} (reverse): WARNING - Mask identical to previous slice, propagation stalled!")
+                            needs_refinement = True
+                        
+                        # Check entropy for adaptive point sampling
+                        if entropy_3d is not None and out_frame_idx < entropy_3d.shape[0]:
+                            mean_entropy = get_slice_mean_entropy(entropy_3d, out_frame_idx)
+                            if mean_entropy is not None and entropy_75th_percentile is not None:
+                                if mean_entropy > entropy_75th_percentile:
+                                    print(f"    Frame {out_frame_idx} (reverse): High entropy ({mean_entropy:.4f} > {entropy_75th_percentile:.4f}), adding adaptive points")
+                                    needs_refinement = True
+                        
+                        # Refinement Step: Add new points if needed
+                        if needs_refinement and out_frame_idx < segs_3D.shape[0]:
+                            # Sample 5 positive points from nnU-Net core
+                            pos_points = sample_positive_points_from_nnunet_core(nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            # Sample 5 negative points from high-entropy boundary zones
+                            neg_points = sample_negative_points_from_entropy_boundary(entropy_3d, nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            
+                            if len(pos_points) > 0 or len(neg_points) > 0:
+                                # Combine points: positive (label=1) and negative (label=0)
+                                all_points = []
+                                all_labels = []
+                                
+                                for pt in pos_points:
+                                    all_points.append([pt[1], pt[0]])  # Convert [y, x] to [x, y] for SAM2
+                                    all_labels.append(1)
+                                
+                                for pt in neg_points:
+                                    all_points.append([pt[1], pt[0]])  # Convert [y, x] to [x, y] for SAM2
+                                    all_labels.append(0)
+                                
+                                if len(all_points) > 0:
+                                    points_tensor = torch.from_numpy(np.array(all_points)).to(device).unsqueeze(0)  # [1, N, 2]
+                                    labels_tensor = torch.from_numpy(np.array(all_labels)).to(device).unsqueeze(0)  # [1, N]
+                                    
+                                    # Add new points to current frame
+                                    try:
+                                        _, out_obj_ids, out_mask_logits_refined = predictor.add_new_points_or_box(
+                                            inference_state=inference_state,
+                                            frame_idx=out_frame_idx,
+                                            obj_id=1,
+                                            points=points_tensor,
+                                            labels=labels_tensor,
+                                            box=None,
+                                        )
+                                        # Update mask_2d with refined output
+                                        mask_2d_refined = (out_mask_logits_refined[0] > 0.0).cpu().numpy()[0]
+                                        if mask_2d_refined.ndim == 2:
+                                            mask_2d = mask_2d_refined.astype(bool)
+                                            if mask_2d.shape != expected_shape:
+                                                zoom_factors = (expected_shape[0] / mask_2d.shape[0], expected_shape[1] / mask_2d.shape[1])
+                                                mask_2d = zoom(mask_2d.astype(float), zoom_factors, order=0) > 0.5
+                                            print(f"    Frame {out_frame_idx} (reverse): Added {len(pos_points)} positive + {len(neg_points)} negative points, refined mask")
+                                    except Exception as e:
+                                        print(f"    Frame {out_frame_idx} (reverse): Warning - Could not add adaptive points: {e}")
+                        
                         # Apply mask to segmentation (mask_2d should be [H, W] boolean)
-                        segs_3D[out_frame_idx, mask_2d] = 1
+                        if out_frame_idx < segs_3D.shape[0]:
+                            segs_3D[out_frame_idx, mask_2d] = 1
+                            # Store current mask for next iteration validation
+                            prev_mask_2d_reverse = mask_2d.copy()
                     
                     predictor.reset_state(inference_state)
                     # Re-initialize inference state for reverse propagation (CRITICAL: must re-init after reset)
@@ -665,7 +927,8 @@ for case_info in tqdm(cases_to_process):
                             box=bbox,
                         )
                     
-                    # Reverse propagation
+                    # Reverse propagation with Adaptive Point Sampling (CPU path - second reverse)
+                    prev_mask_2d_reverse2 = None
                     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=True):
                         mask_tensor = out_mask_logits[0]
                         mask_2d = (mask_tensor > 0.0).cpu().numpy()
@@ -679,7 +942,61 @@ for case_info in tqdm(cases_to_process):
                         if mask_2d.shape != expected_shape:
                             zoom_factors = (expected_shape[0] / mask_2d.shape[0], expected_shape[1] / mask_2d.shape[1])
                             mask_2d = zoom(mask_2d.astype(float), zoom_factors, order=0) > 0.5
-                        segs_3D[out_frame_idx, mask_2d] = 1
+                        
+                        # Validation: Check if mask is identical to previous slice
+                        needs_refinement = False
+                        if prev_mask_2d_reverse2 is not None and is_mask_identical(mask_2d, prev_mask_2d_reverse2):
+                            print(f"    Frame {out_frame_idx} (reverse2): WARNING - Mask identical to previous slice, propagation stalled!")
+                            needs_refinement = True
+                        
+                        # Check entropy for adaptive point sampling
+                        if entropy_3d is not None and out_frame_idx < entropy_3d.shape[0]:
+                            mean_entropy = get_slice_mean_entropy(entropy_3d, out_frame_idx)
+                            if mean_entropy is not None and entropy_75th_percentile is not None:
+                                if mean_entropy > entropy_75th_percentile:
+                                    print(f"    Frame {out_frame_idx} (reverse2): High entropy ({mean_entropy:.4f} > {entropy_75th_percentile:.4f}), adding adaptive points")
+                                    needs_refinement = True
+                        
+                        # Refinement Step: Add new points if needed
+                        if needs_refinement and out_frame_idx < segs_3D.shape[0]:
+                            pos_points = sample_positive_points_from_nnunet_core(nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            neg_points = sample_negative_points_from_entropy_boundary(entropy_3d, nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            
+                            if len(pos_points) > 0 or len(neg_points) > 0:
+                                all_points = []
+                                all_labels = []
+                                for pt in pos_points:
+                                    all_points.append([pt[1], pt[0]])
+                                    all_labels.append(1)
+                                for pt in neg_points:
+                                    all_points.append([pt[1], pt[0]])
+                                    all_labels.append(0)
+                                
+                                if len(all_points) > 0:
+                                    points_tensor = torch.from_numpy(np.array(all_points)).to(device).unsqueeze(0)
+                                    labels_tensor = torch.from_numpy(np.array(all_labels)).to(device).unsqueeze(0)
+                                    try:
+                                        _, out_obj_ids, out_mask_logits_refined = predictor.add_new_points_or_box(
+                                            inference_state=inference_state,
+                                            frame_idx=out_frame_idx,
+                                            obj_id=1,
+                                            points=points_tensor,
+                                            labels=labels_tensor,
+                                            box=None,
+                                        )
+                                        mask_2d_refined = (out_mask_logits_refined[0] > 0.0).cpu().numpy()[0]
+                                        if mask_2d_refined.ndim == 2:
+                                            mask_2d = mask_2d_refined.astype(bool)
+                                            if mask_2d.shape != expected_shape:
+                                                zoom_factors = (expected_shape[0] / mask_2d.shape[0], expected_shape[1] / mask_2d.shape[1])
+                                                mask_2d = zoom(mask_2d.astype(float), zoom_factors, order=0) > 0.5
+                                            print(f"    Frame {out_frame_idx} (reverse2): Added {len(pos_points)} positive + {len(neg_points)} negative points, refined mask")
+                                    except Exception as e:
+                                        print(f"    Frame {out_frame_idx} (reverse2): Warning - Could not add adaptive points: {e}")
+                        
+                        if out_frame_idx < segs_3D.shape[0]:
+                            segs_3D[out_frame_idx, mask_2d] = 1
+                            prev_mask_2d_reverse2 = mask_2d.copy()
                     
                     predictor.reset_state(inference_state)
             else:
@@ -713,6 +1030,8 @@ for case_info in tqdm(cases_to_process):
                             box=bbox,
                         )
                     
+                    # Forward propagation with Adaptive Point Sampling (CPU path)
+                    prev_mask_2d_cpu = None
                     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
                         # Follow exact pattern from medsam2_infer_CT_lesion_npz_recist.py line 383
                         # out_mask_logits[0] shape is [1, H, W], need [0] after numpy conversion
@@ -740,11 +1059,63 @@ for case_info in tqdm(cases_to_process):
                             if out_frame_idx <= key_slice_idx_offset + 2:
                                 print(f"    Frame {out_frame_idx}: Resized mask from {mask_2d.shape} to {expected_shape}")
                         
+                        # Validation: Check if mask is identical to previous slice (stalled propagation)
+                        needs_refinement = False
+                        if prev_mask_2d_cpu is not None and is_mask_identical(mask_2d, prev_mask_2d_cpu):
+                            print(f"    Frame {out_frame_idx} (CPU): WARNING - Mask identical to previous slice, propagation stalled!")
+                            needs_refinement = True
+                        
+                        # Check entropy for adaptive point sampling
+                        if entropy_3d is not None and out_frame_idx < entropy_3d.shape[0]:
+                            mean_entropy = get_slice_mean_entropy(entropy_3d, out_frame_idx)
+                            if mean_entropy is not None and entropy_75th_percentile is not None:
+                                if mean_entropy > entropy_75th_percentile:
+                                    print(f"    Frame {out_frame_idx} (CPU): High entropy ({mean_entropy:.4f} > {entropy_75th_percentile:.4f}), adding adaptive points")
+                                    needs_refinement = True
+                        
+                        # Refinement Step: Add new points if needed
+                        if needs_refinement and out_frame_idx < segs_3D.shape[0]:
+                            pos_points = sample_positive_points_from_nnunet_core(nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            neg_points = sample_negative_points_from_entropy_boundary(entropy_3d, nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            
+                            if len(pos_points) > 0 or len(neg_points) > 0:
+                                all_points = []
+                                all_labels = []
+                                for pt in pos_points:
+                                    all_points.append([pt[1], pt[0]])
+                                    all_labels.append(1)
+                                for pt in neg_points:
+                                    all_points.append([pt[1], pt[0]])
+                                    all_labels.append(0)
+                                
+                                if len(all_points) > 0:
+                                    points_tensor = torch.from_numpy(np.array(all_points)).to(device).unsqueeze(0)
+                                    labels_tensor = torch.from_numpy(np.array(all_labels)).to(device).unsqueeze(0)
+                                    try:
+                                        _, out_obj_ids, out_mask_logits_refined = predictor.add_new_points_or_box(
+                                            inference_state=inference_state,
+                                            frame_idx=out_frame_idx,
+                                            obj_id=1,
+                                            points=points_tensor,
+                                            labels=labels_tensor,
+                                            box=None,
+                                        )
+                                        mask_2d_refined = (out_mask_logits_refined[0] > 0.0).cpu().numpy()[0]
+                                        if mask_2d_refined.ndim == 2:
+                                            mask_2d = mask_2d_refined.astype(bool)
+                                            if mask_2d.shape != expected_shape:
+                                                zoom_factors = (expected_shape[0] / mask_2d.shape[0], expected_shape[1] / mask_2d.shape[1])
+                                                mask_2d = zoom(mask_2d.astype(float), zoom_factors, order=0) > 0.5
+                                            print(f"    Frame {out_frame_idx} (CPU): Added {len(pos_points)} positive + {len(neg_points)} negative points, refined mask")
+                                    except Exception as e:
+                                        print(f"    Frame {out_frame_idx} (CPU): Warning - Could not add adaptive points: {e}")
+                        
                         # Apply mask to segmentation - use exact pattern from working example
                         # segs_3D shape: [D, H, W], mask_2d shape: [H, W]
                         if out_frame_idx < segs_3D.shape[0]:
                             # Use boolean indexing: segs_3D[z, y, x] where mask_2d[y, x] is True
                             segs_3D[out_frame_idx, mask_2d] = 1
+                            prev_mask_2d_cpu = mask_2d.copy()
                             
                             # Debug: check if any voxels were set
                             if out_frame_idx <= key_slice_idx_offset + 2:
@@ -781,6 +1152,8 @@ for case_info in tqdm(cases_to_process):
                             box=bbox,
                         )
                     
+                    # Reverse propagation with Adaptive Point Sampling (CPU path)
+                    prev_mask_2d_cpu_reverse = None
                     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=True):
                         # out_mask_logits shape: [num_objects, H, W] or [num_objects, 1, H, W]
                         # Get first object's mask
@@ -804,8 +1177,61 @@ for case_info in tqdm(cases_to_process):
                             zoom_factors = (expected_shape[0] / mask_2d.shape[0], expected_shape[1] / mask_2d.shape[1])
                             mask_2d = zoom(mask_2d.astype(float), zoom_factors, order=0) > 0.5
                         
+                        # Validation: Check if mask is identical to previous slice
+                        needs_refinement = False
+                        if prev_mask_2d_cpu_reverse is not None and is_mask_identical(mask_2d, prev_mask_2d_cpu_reverse):
+                            print(f"    Frame {out_frame_idx} (CPU reverse): WARNING - Mask identical to previous slice, propagation stalled!")
+                            needs_refinement = True
+                        
+                        # Check entropy for adaptive point sampling
+                        if entropy_3d is not None and out_frame_idx < entropy_3d.shape[0]:
+                            mean_entropy = get_slice_mean_entropy(entropy_3d, out_frame_idx)
+                            if mean_entropy is not None and entropy_75th_percentile is not None:
+                                if mean_entropy > entropy_75th_percentile:
+                                    print(f"    Frame {out_frame_idx} (CPU reverse): High entropy ({mean_entropy:.4f} > {entropy_75th_percentile:.4f}), adding adaptive points")
+                                    needs_refinement = True
+                        
+                        # Refinement Step: Add new points if needed
+                        if needs_refinement and out_frame_idx < segs_3D.shape[0]:
+                            pos_points = sample_positive_points_from_nnunet_core(nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            neg_points = sample_negative_points_from_entropy_boundary(entropy_3d, nnunet_seg_data, label_id, out_frame_idx, n_points=5)
+                            
+                            if len(pos_points) > 0 or len(neg_points) > 0:
+                                all_points = []
+                                all_labels = []
+                                for pt in pos_points:
+                                    all_points.append([pt[1], pt[0]])
+                                    all_labels.append(1)
+                                for pt in neg_points:
+                                    all_points.append([pt[1], pt[0]])
+                                    all_labels.append(0)
+                                
+                                if len(all_points) > 0:
+                                    points_tensor = torch.from_numpy(np.array(all_points)).to(device).unsqueeze(0)
+                                    labels_tensor = torch.from_numpy(np.array(all_labels)).to(device).unsqueeze(0)
+                                    try:
+                                        _, out_obj_ids, out_mask_logits_refined = predictor.add_new_points_or_box(
+                                            inference_state=inference_state,
+                                            frame_idx=out_frame_idx,
+                                            obj_id=1,
+                                            points=points_tensor,
+                                            labels=labels_tensor,
+                                            box=None,
+                                        )
+                                        mask_2d_refined = (out_mask_logits_refined[0] > 0.0).cpu().numpy()[0]
+                                        if mask_2d_refined.ndim == 2:
+                                            mask_2d = mask_2d_refined.astype(bool)
+                                            if mask_2d.shape != expected_shape:
+                                                zoom_factors = (expected_shape[0] / mask_2d.shape[0], expected_shape[1] / mask_2d.shape[1])
+                                                mask_2d = zoom(mask_2d.astype(float), zoom_factors, order=0) > 0.5
+                                            print(f"    Frame {out_frame_idx} (CPU reverse): Added {len(pos_points)} positive + {len(neg_points)} negative points, refined mask")
+                                    except Exception as e:
+                                        print(f"    Frame {out_frame_idx} (CPU reverse): Warning - Could not add adaptive points: {e}")
+                        
                         # Apply mask to segmentation (mask_2d should be [H, W] boolean)
-                        segs_3D[out_frame_idx, mask_2d] = 1
+                        if out_frame_idx < segs_3D.shape[0]:
+                            segs_3D[out_frame_idx, mask_2d] = 1
+                            prev_mask_2d_cpu_reverse = mask_2d.copy()
                     
                     predictor.reset_state(inference_state)
         
